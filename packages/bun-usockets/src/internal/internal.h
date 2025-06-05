@@ -154,6 +154,8 @@ void us_internal_socket_context_unlink_socket(int ssl,
     us_socket_context_r context, us_socket_r s);
 
 void us_internal_socket_after_resolve(struct us_connecting_socket_t *s);
+
+struct us_socket_t* us_socket_context_connect_resolved_dns(struct us_socket_context_t *context, struct sockaddr_storage* addr, int options, int socket_ext_size, struct sockaddr_storage* local_addr, unsigned short local_port);
 void us_internal_socket_after_open(us_socket_r s, int error);
 struct us_internal_ssl_socket_t *
 us_internal_ssl_socket_close(us_internal_ssl_socket_r s, int code,
@@ -204,6 +206,8 @@ struct us_connecting_socket_t {
     // this is used to track pending connecting sockets in the context
     struct us_connecting_socket_t* next_pending;
     struct us_connecting_socket_t* prev_pending;
+    // local address for binding before connect
+    struct sockaddr_storage* local_address;
 };
 
 struct us_wrapped_socket_context_t {
@@ -414,7 +418,7 @@ struct us_listen_socket_t *us_internal_ssl_socket_context_listen_unix(
 
 struct us_socket_t *us_internal_ssl_socket_context_connect(
     us_internal_ssl_socket_context_r context, const char *host,
-    int port, int options, int socket_ext_size, int* is_resolved);
+    int port, int options, int socket_ext_size, int* is_resolved, const char *local_address, unsigned short local_port);
 
 struct us_socket_t *us_internal_ssl_socket_context_connect_unix(
     us_internal_ssl_socket_context_r context, const char *server_path,

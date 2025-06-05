@@ -645,6 +645,7 @@ const SocketHandlers2: SocketHandler<NonNullable<import("node:net").Socket["_han
 
 function kConnectTcp(self, addressType, req, address, port) {
   $debug("SocketHandle.kConnectTcp", addressType, address, port);
+  console.log("[DEBUG] kConnectTcp with localAddress:", req.localAddress, "localPort:", req.localPort);
   const promise = doConnect(self._handle, {
     hostname: address,
     port,
@@ -653,6 +654,8 @@ function kConnectTcp(self, addressType, req, address, port) {
     tls: req.tls,
     data: { self, req },
     socket: self[khandlers],
+    localAddress: req.localAddress,
+    localPort: req.localPort,
   });
   promise.catch(_reason => {
     // eat this so there's no unhandledRejection
@@ -1707,8 +1710,20 @@ function internalConnect(self, options, address, port, addressType, localAddress
   let err;
 
   if (localAddress || localPort) {
+    // Ensure localPort has a default value (0 = any available port) when localAddress is specified
+    if (localAddress && localPort === undefined) {
+      console.log('[DEBUG] Setting default localPort to 0 (any available port)');
+      localPort = 0;
+    }
+    
     if (addressType === 4) {
-      localAddress ||= DEFAULT_IPV4_ADDR;
+      console.log(options);
+      console.log(localAddress);
+      console.log('setting local address to ' + localAddress);	
+      if(localAddress.length == 0) {
+        localAddress ||= DEFAULT_IPV4_ADDR;
+      }
+      console.log('setting local address to ' + localAddress);
       // TODO:
       // err = self._handle.bind(localAddress, localPort);
     } else {
@@ -1785,6 +1800,8 @@ function internalConnect(self, options, address, port, addressType, localAddress
     req.addressType = addressType;
     req.tls = tls;
 
+    console.log(req);
+    console.log('doing tcp')
     err = kConnectTcp(self, addressType, req, address, port);
   } else {
     const req: any = {};

@@ -17,6 +17,8 @@
 
 #include "internal/internal.h"
 #include "libusockets.h"
+#include <arpa/inet.h>
+#include <stdio.h>
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
@@ -416,11 +418,67 @@ struct us_listen_socket_t *us_socket_context_listen_unix(int ssl, struct us_sock
     return ls;
 }
 
-struct us_socket_t* us_socket_context_connect_resolved_dns(struct us_socket_context_t *context, struct sockaddr_storage* addr, int options, int socket_ext_size) {
-    LIBUS_SOCKET_DESCRIPTOR connect_socket_fd = bsd_create_connect_socket(addr, options);
+struct us_socket_t* us_socket_context_connect_resolved_dns(struct us_socket_context_t *context, struct sockaddr_storage* addr, int options, int socket_ext_size, struct sockaddr_storage* local_addr, unsigned short local_port) {
+    printf("[DEBUG] us_socket_context_connect_resolved_dns called\n");
+    
+    // Print remote address details
+    if (addr) {
+        if (addr->ss_family == AF_INET) {
+            struct sockaddr_in *addr_in = (struct sockaddr_in *)addr;
+            char ip_str[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &(addr_in->sin_addr), ip_str, INET_ADDRSTRLEN);
+            printf("[DEBUG] Remote IPv4 address: %s, port: %d\n", ip_str, ntohs(addr_in->sin_port));
+        } else if (addr->ss_family == AF_INET6) {
+            struct sockaddr_in6 *addr_in6 = (struct sockaddr_in6 *)addr;
+            char ip_str[INET6_ADDRSTRLEN];
+            inet_ntop(AF_INET6, &(addr_in6->sin6_addr), ip_str, INET6_ADDRSTRLEN);
+            printf("[DEBUG] Remote IPv6 address: %s, port: %d\n", ip_str, ntohs(addr_in6->sin6_port));
+        }
+    }
+    
+    // Print local address details
+    if (local_addr) {
+        printf("[DEBUG] Local address provided to connect_resolved_dns\n");
+        if (local_addr->ss_family == AF_INET) {
+            struct sockaddr_in *addr_in = (struct sockaddr_in *)local_addr;
+            char ip_str[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &(addr_in->sin_addr), ip_str, INET_ADDRSTRLEN);
+            printf("[DEBUG] Local IPv4 address: %s, port: %d\n", ip_str, ntohs(addr_in->sin_port));
+        } else if (local_addr->ss_family == AF_INET6) {
+            struct sockaddr_in6 *addr_in6 = (struct sockaddr_in6 *)local_addr;
+            char ip_str[INET6_ADDRSTRLEN];
+            inet_ntop(AF_INET6, &(addr_in6->sin6_addr), ip_str, INET6_ADDRSTRLEN);
+            printf("[DEBUG] Local IPv6 address: %s, port: %d\n", ip_str, ntohs(addr_in6->sin6_port));
+        } else {
+            printf("[DEBUG] Unknown local address family: %d\n", local_addr->ss_family);
+        }
+    } else {
+        printf("[DEBUG] No local address provided to connect_resolved_dns\n");
+    }
+    
+    // Create a socket and bind to local address if provided
+    printf("[DEBUG] Creating socket with local_addr: %p, local_port: %d\n", local_addr, local_port);
+    
+    // If we have a local address and port, set it in the sockaddr
+    if (local_addr != NULL && local_port > 0) {
+        if (local_addr->ss_family == AF_INET) {
+            struct sockaddr_in *addr_in = (struct sockaddr_in *)local_addr;
+            addr_in->sin_port = htons(local_port);
+            printf("[DEBUG] Set IPv4 local port to: %d\n", local_port);
+        } else if (local_addr->ss_family == AF_INET6) {
+            struct sockaddr_in6 *addr_in6 = (struct sockaddr_in6 *)local_addr;
+            addr_in6->sin6_port = htons(local_port);
+            printf("[DEBUG] Set IPv6 local port to: %d\n", local_port);
+        }
+    }
+    
+    LIBUS_SOCKET_DESCRIPTOR connect_socket_fd = bsd_create_connect_socket(addr, options, local_addr);
     if (connect_socket_fd == LIBUS_SOCKET_ERROR) {
+        printf("[DEBUG] bsd_create_connect_socket failed\n");
         return NULL;
     }
+    
+    printf("[DEBUG] bsd_create_connect_socket succeeded with fd: %d\n", connect_socket_fd);
 
     bsd_socket_nodelay(connect_socket_fd, 1);
 
@@ -460,10 +518,16 @@ static void init_addr_with_port(struct addrinfo* info, int port, struct sockaddr
 }
 
 static bool try_parse_ip(const char *ip_str, int port, struct sockaddr_storage *storage) {
+    printf("[DEBUG] try_parse_ip called with ip_str: %s, port: %d\n", ip_str, port);
     memset(storage, 0, sizeof(struct sockaddr_storage));
+    
     // Try to parse as IPv4
     struct sockaddr_in *addr4 = (struct sockaddr_in *)storage;
-    if (inet_pton(AF_INET, ip_str, &addr4->sin_addr) == 1) {
+    int ipv4_result = inet_pton(AF_INET, ip_str, &addr4->sin_addr);
+    printf("[DEBUG] IPv4 parse result: %d (1=success, 0=invalid format, -1=error)\n", ipv4_result);
+    
+    if (ipv4_result == 1) {
+        printf("[DEBUG] Successfully parsed as IPv4\n");
         addr4->sin_port = htons(port);
         addr4->sin_family = AF_INET;
 #ifdef __APPLE__
@@ -474,7 +538,11 @@ static bool try_parse_ip(const char *ip_str, int port, struct sockaddr_storage *
 
     // Try to parse as IPv6
     struct sockaddr_in6 *addr6 = (struct sockaddr_in6 *)storage;
-    if (inet_pton(AF_INET6, ip_str, &addr6->sin6_addr) == 1) {
+    int ipv6_result = inet_pton(AF_INET6, ip_str, &addr6->sin6_addr);
+    printf("[DEBUG] IPv6 parse result: %d (1=success, 0=invalid format, -1=error)\n", ipv6_result);
+    
+    if (ipv6_result == 1) {
+        printf("[DEBUG] Successfully parsed as IPv6\n");
         addr6->sin6_port = htons(port);
         addr6->sin6_family = AF_INET6;
 #ifdef __APPLE__
@@ -487,10 +555,16 @@ static bool try_parse_ip(const char *ip_str, int port, struct sockaddr_storage *
     return 0;
 }
 
-void *us_socket_context_connect(int ssl, struct us_socket_context_t *context, const char *host, int port, int options, int socket_ext_size, int* has_dns_resolved) {
+void *us_socket_context_connect(int ssl, struct us_socket_context_t *context, const char *host, int port, int options, int socket_ext_size, int* has_dns_resolved, const char *local_address, unsigned short local_port) {
+    printf("[DEBUG] us_socket_context_connect called with host: %s, port: %d\n", host, port);
+    if (local_address) {
+        printf("[DEBUG] Local address provided: %s\n", local_address);
+    } else {
+        printf("[DEBUG] No local address provided\n");
+    }
 #ifndef LIBUS_NO_SSL
     if (ssl == 1) {
-        return us_internal_ssl_socket_context_connect((struct us_internal_ssl_socket_context_t *) context, host, port, options, socket_ext_size, has_dns_resolved);
+        return us_internal_ssl_socket_context_connect((struct us_internal_ssl_socket_context_t *) context, host, port, options, socket_ext_size, has_dns_resolved, local_address, local_port);
     }
 #endif
 
@@ -498,9 +572,36 @@ void *us_socket_context_connect(int ssl, struct us_socket_context_t *context, co
 
     // fast path for IP addresses in text form
     struct sockaddr_storage addr;
+    struct sockaddr_storage local_addr;
+    int has_local_addr = 0;
+    
+    if (local_address != NULL) {
+        printf("[DEBUG] Attempting to parse local address: %s\n", local_address);
+        has_local_addr = try_parse_ip(local_address, 0, &local_addr);
+        if (has_local_addr) {
+            printf("[DEBUG] Successfully parsed local address as IP\n");
+            
+            // Print the parsed address
+            if (local_addr.ss_family == AF_INET) {
+                struct sockaddr_in *addr_in = (struct sockaddr_in *)&local_addr;
+                char ip_str[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET, &(addr_in->sin_addr), ip_str, INET_ADDRSTRLEN);
+                printf("[DEBUG] Parsed local IPv4 address: %s\n", ip_str);
+            } else if (local_addr.ss_family == AF_INET6) {
+                struct sockaddr_in6 *addr_in6 = (struct sockaddr_in6 *)&local_addr;
+                char ip_str[INET6_ADDRSTRLEN];
+                inet_ntop(AF_INET6, &(addr_in6->sin6_addr), ip_str, INET6_ADDRSTRLEN);
+                printf("[DEBUG] Parsed local IPv6 address: %s\n", ip_str);
+            }
+        } else {
+            printf("[DEBUG] Failed to parse local address as IP, will use DNS resolution\n");
+        }
+    }
+    
     if (try_parse_ip(host, port, &addr)) {
         *has_dns_resolved = 1;
-        return us_socket_context_connect_resolved_dns(context, &addr, options, socket_ext_size);
+        printf("[DEBUG] Calling connect_resolved_dns with local_port: %d\n", local_port);
+        return us_socket_context_connect_resolved_dns(context, &addr, options, socket_ext_size, has_local_addr ? &local_addr : NULL, local_port);
     }
 
     struct addrinfo_request* ai_req;
@@ -519,7 +620,8 @@ void *us_socket_context_connect(int ssl, struct us_socket_context_t *context, co
             struct sockaddr_storage addr;
             init_addr_with_port(&result->entries->info, port, &addr);
             *has_dns_resolved = 1;
-            struct us_socket_t *s = us_socket_context_connect_resolved_dns(context, &addr, options, socket_ext_size);
+            printf("[DEBUG] DNS resolution path: Calling connect_resolved_dns with local_port: %d\n", local_port);
+            struct us_socket_t *s = us_socket_context_connect_resolved_dns(context, &addr, options, socket_ext_size, has_local_addr ? &local_addr : NULL, local_port);
             Bun__addrinfo_freeRequest(ai_req, s == NULL);
             return s;
         }
@@ -543,6 +645,8 @@ void *us_socket_context_connect(int ssl, struct us_socket_context_t *context, co
 
     Bun__addrinfo_set(ai_req, c);
 
+    printf("[DEBUG] DNS resolution started\n");
+
     return c;
 }
 
@@ -551,7 +655,13 @@ int start_connections(struct us_connecting_socket_t *c, int count) {
     for (; c->addrinfo_head != NULL && opened < count; c->addrinfo_head = c->addrinfo_head->ai_next) {
         struct sockaddr_storage addr;
         init_addr_with_port(c->addrinfo_head, c->port, &addr);
-        LIBUS_SOCKET_DESCRIPTOR connect_socket_fd = bsd_create_connect_socket(&addr, c->options);
+        
+        struct sockaddr_storage *local_addr_ptr = NULL;
+        if (c->local_address) {
+            local_addr_ptr = c->local_address;
+        }
+        
+        LIBUS_SOCKET_DESCRIPTOR connect_socket_fd = bsd_create_connect_socket(&addr, c->options, local_addr_ptr);
         if (connect_socket_fd == LIBUS_SOCKET_ERROR) {
             continue;
         }

@@ -482,7 +482,7 @@ pub fn NewSocketHandler(comptime is_ssl: bool) type {
             defer allocator.free(host);
 
             var did_dns_resolve: i32 = 0;
-            const socket = socket_ctx.connect(is_ssl, host_, port, if (allowHalfOpen) uws.LIBUS_SOCKET_ALLOW_HALF_OPEN else 0, @sizeOf(Context), &did_dns_resolve) orelse return null;
+            const socket = socket_ctx.connect(is_ssl, host_, port, if (allowHalfOpen) uws.LIBUS_SOCKET_ALLOW_HALF_OPEN else 0, @sizeOf(Context), &did_dns_resolve, null) orelse return null;
             const socket_ = if (did_dns_resolve == 1)
                 ThisSocket{
                     .socket = .{ .connected = @ptrCast(socket) },
@@ -507,7 +507,7 @@ pub fn NewSocketHandler(comptime is_ssl: bool) type {
             comptime socket_field_name: []const u8,
             allowHalfOpen: bool,
         ) !*Context {
-            const this_socket = try connectAnon(host, port, socket_ctx, ctx, allowHalfOpen);
+            const this_socket = try connectAnon(host, port, socket_ctx, ctx, allowHalfOpen, null, null);
             @field(ctx, socket_field_name) = this_socket;
             return ctx;
         }
@@ -597,6 +597,8 @@ pub fn NewSocketHandler(comptime is_ssl: bool) type {
             socket_ctx: *SocketContext,
             ptr: *anyopaque,
             allowHalfOpen: bool,
+            local_address: ?[]const u8,
+            local_port: ?u16,
         ) !ThisSocket {
             debug("connect({s}, {d})", .{ raw_host, port });
             var stack_fallback = std.heap.stackFallback(1024, bun.default_allocator);
@@ -612,6 +614,33 @@ pub fn NewSocketHandler(comptime is_ssl: bool) type {
             defer allocator.free(host);
 
             var did_dns_resolve: i32 = 0;
+            // For the local address binding
+            var local_host_z: ?[:0]const u8 = null;
+            defer if (local_host_z != null) allocator.free(@constCast(local_host_z.?));
+            
+            if (local_address != null) {
+                std.debug.print("[DEBUG] Local address provided: {s}\n", .{local_address.?});
+                
+                // Clean local address the same way as remote host
+                const clean_local = if (local_address.?.len > 1 and local_address.?[0] == '[' and local_address.?[local_address.?.len - 1] == ']')
+                    local_address.?[1 .. local_address.?.len - 1]
+                else
+                    local_address.?;
+                
+                std.debug.print("[DEBUG] Cleaned local address: {s}\n", .{clean_local});
+                    
+                local_host_z = allocator.dupeZ(u8, clean_local) catch bun.outOfMemory();
+                std.debug.print("[DEBUG] Local address duped to null-terminated string\n", .{});
+                
+                if (local_port) |lp| {
+                    std.debug.print("[DEBUG] Local port provided: {}\n", .{lp});
+                } else {
+                    std.debug.print("[DEBUG] No local port provided\n", .{});
+                }
+            } else {
+                std.debug.print("[DEBUG] No local address provided\n", .{});
+            }
+            
             const socket_ptr = socket_ctx.connect(
                 is_ssl,
                 host.ptr,
@@ -619,6 +648,8 @@ pub fn NewSocketHandler(comptime is_ssl: bool) type {
                 if (allowHalfOpen) uws.LIBUS_SOCKET_ALLOW_HALF_OPEN else 0,
                 @sizeOf(*anyopaque),
                 &did_dns_resolve,
+                if (local_host_z) |z| z.ptr else null,
+                if (local_port) |lp| lp else 0,
             ) orelse return error.FailedToOpenSocket;
             const socket = if (did_dns_resolve == 1)
                 ThisSocket{

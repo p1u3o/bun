@@ -313,6 +313,8 @@ pub const SocketConfig = struct {
     allowHalfOpen: bool = false,
     reusePort: bool = false,
     ipv6Only: bool = false,
+    localAddress: ?JSC.ZigString.Slice = null,
+    localPort: ?u16 = null,
 
     pub fn socketFlags(this: *const SocketConfig) i32 {
         var flags: i32 = if (this.exclusive)
@@ -341,6 +343,9 @@ pub const SocketConfig = struct {
         var allowHalfOpen = false;
         var reusePort = false;
         var ipv6Only = false;
+        var localAddress: ?JSC.ZigString.Slice = null;
+        errdefer if (localAddress != null) localAddress.?.deinit();
+        var localPort: ?u16 = null;
 
         var ssl: ?JSC.API.ServerConfig.SSLConfig = null;
         var default_data = JSValue.zero;
@@ -403,6 +408,29 @@ pub const SocketConfig = struct {
 
             if (try opts.getBooleanLoose(globalObject, "ipv6Only")) |ipv6_only| {
                 ipv6Only = ipv6_only;
+            }
+
+            if (try opts.getStringish(globalObject, "localAddress")) |local_addr| {
+                std.debug.print("[DEBUG] localAddress found in options\n", .{});
+                defer local_addr.deref();
+                localAddress = try local_addr.toUTF8WithoutRef(bun.default_allocator).cloneIfNeeded(bun.default_allocator);
+                std.debug.print("[DEBUG] localAddress parsed: {s}\n", .{localAddress.?.slice()});
+            } else {
+                std.debug.print("[DEBUG] No localAddress in options\n", .{});
+            }
+            
+            if (try opts.getTruthy(globalObject, "localPort")) |local_port_val| {
+                if (local_port_val.isNumber()) {
+                    const local_port_int = local_port_val.asInt32();
+                    std.debug.print("[DEBUG] localPort found in options: {}\n", .{local_port_int});
+                    if (local_port_int >= 0 and local_port_int <= 65535) {
+                        localPort = @intCast(local_port_int);
+                    } else {
+                        std.debug.print("[DEBUG] localPort value out of range (0-65535)\n", .{});
+                    }
+                }
+            } else {
+                std.debug.print("[DEBUG] No localPort in options\n", .{});
             }
 
             if (try opts.getStringish(globalObject, "hostname") orelse try opts.getStringish(globalObject, "host")) |hostname| {
@@ -473,41 +501,29 @@ pub const SocketConfig = struct {
             .allowHalfOpen = allowHalfOpen,
             .reusePort = reusePort,
             .ipv6Only = ipv6Only,
+            .localAddress = localAddress,
+            .localPort = localPort,
         };
     }
 };
 
-fn isValidPipeName(pipe_name: []const u8) bool {
-    if (!Environment.isWindows) {
-        return false;
+fn normalizePipeName(path: []const u8, buf: []u8) ?[]const u8 {
+    // Windows named pipe normalization
+    if (path.len == 0) return null;
+    
+    // Check if it's already in the format \\.\pipe\name
+    if (std.mem.startsWith(u8, path, "\\\\.\\pipe\\")) {
+        return path;
     }
-    // check for valid pipe names
-    // at minimum we need to have \\.\pipe\ or \\?\pipe\ + 1 char that is not a separator
-    return pipe_name.len > 9 and
-        NodePath.isSepWindowsT(u8, pipe_name[0]) and
-        NodePath.isSepWindowsT(u8, pipe_name[1]) and
-        (pipe_name[2] == '.' or pipe_name[2] == '?') and
-        NodePath.isSepWindowsT(u8, pipe_name[3]) and
-        strings.eql(pipe_name[4..8], "pipe") and
-        NodePath.isSepWindowsT(u8, pipe_name[8]) and
-        !NodePath.isSepWindowsT(u8, pipe_name[9]);
-}
-
-fn normalizePipeName(pipe_name: []const u8, buffer: []u8) ?[]const u8 {
-    if (Environment.isWindows) {
-        bun.assert(pipe_name.len < buffer.len);
-        if (!isValidPipeName(pipe_name)) {
-            return null;
-        }
-        // normalize pipe name with can have mixed slashes
-        // pipes are simple and this will be faster than using node:path.resolve()
-        // we dont wanna to normalize the pipe name it self only the pipe identifier (//./pipe/, //?/pipe/, etc)
-        @memcpy(buffer[0..9], "\\\\.\\pipe\\");
-        @memcpy(buffer[9..pipe_name.len], pipe_name[9..]);
-        return buffer[0..pipe_name.len];
-    } else {
-        return null;
-    }
+    
+    // Convert path to Windows named pipe format
+    const prefix = "\\\\.\\pipe\\";
+    if (prefix.len + path.len > buf.len) return null;
+    
+    std.mem.copy(u8, buf[0..prefix.len], prefix);
+    std.mem.copy(u8, buf[prefix.len..][0..path.len], path);
+    
+    return buf[0..prefix.len + path.len];
 }
 
 pub const Listener = struct {
@@ -551,6 +567,8 @@ pub const Listener = struct {
         host: struct {
             host: []const u8,
             port: u16,
+            local_address: ?[]const u8 = null,
+            local_port: ?u16 = null,
         },
         fd: bun.FileDescriptor,
 
@@ -566,6 +584,8 @@ pub const Listener = struct {
                         .host = .{
                             .host = (bun.default_allocator.dupe(u8, h.host) catch bun.outOfMemory()),
                             .port = this.host.port,
+                            .local_address = if (h.local_address) |la| (bun.default_allocator.dupe(u8, la) catch bun.outOfMemory()) else null,
+                            .local_port = h.local_port,
                         },
                     };
                 },
@@ -1086,7 +1106,14 @@ pub const Listener = struct {
                 }
             }
             if (port) |_| {
-                break :blk .{ .host = .{ .host = (hostname_or_unix.cloneIfNeeded(bun.default_allocator) catch bun.outOfMemory()).slice(), .port = port.? } };
+                const local_address = if (socket_config.localAddress) |la| (la.cloneIfNeeded(bun.default_allocator) catch bun.outOfMemory()).slice() else null;
+                std.debug.print("[DEBUG] Creating connection with localAddress: {?s}, localPort: {?}\n", .{local_address, socket_config.localPort});
+                break :blk .{ .host = .{ 
+                    .host = (hostname_or_unix.cloneIfNeeded(bun.default_allocator) catch bun.outOfMemory()).slice(), 
+                    .port = port.?, 
+                    .local_address = local_address,
+                    .local_port = socket_config.localPort
+                } };
             }
 
             break :blk .{ .unix = (hostname_or_unix.cloneIfNeeded(bun.default_allocator) catch bun.outOfMemory()).slice() };
@@ -1474,12 +1501,24 @@ fn NewSocket(comptime ssl: bool) type {
 
             switch (connection) {
                 .host => |c| {
+                    const local_address = if (this.connection) |conn| switch (conn) {
+                        .host => |h| if (h.local_address) |la| normalizeHost(la) else null,
+                        else => null,
+                    } else null;
+                    
+                    const local_port = if (this.connection) |conn| switch (conn) {
+                        .host => |h| h.local_port,
+                        else => null,
+                    } else null;
+                    
                     this.socket = try This.Socket.connectAnon(
                         normalizeHost(c.host),
                         c.port,
                         this.socket_context.?,
                         this,
                         this.flags.allow_half_open,
+                        local_address,
+                        local_port,
                     );
                 },
                 .unix => |u| {

@@ -1051,6 +1051,8 @@ fn NewHTTPContext(comptime ssl: bool) type {
                 this.us_socket_context,
                 ActiveSocket.init(client).ptr(),
                 false,
+                null,
+                null,
             );
             client.allow_retry = false;
             return socket;

@@ -32,12 +32,17 @@
 #endif
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
-#include <string.h>
+#include <errno.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <errno.h>
 #else /* _WIN32 */
 #include <mstcpip.h>
 #endif
@@ -1335,45 +1340,62 @@ int bsd_disconnect_udp_socket(LIBUS_SOCKET_DESCRIPTOR fd) {
 
 static int bsd_do_connect_raw(LIBUS_SOCKET_DESCRIPTOR fd, struct sockaddr *addr, size_t namelen)
 {
+    printf("[DEBUG] bsd_do_connect_raw called with fd: %d, namelen: %zu\n", fd, namelen);
+    
 #ifdef _WIN32
+    printf("[DEBUG] Windows connect path\n");
     while (1) {
         if (connect(fd, (struct sockaddr *)addr, namelen) == 0) {
+            printf("[DEBUG] Windows connect succeeded immediately\n");
             return 0;
         }
 
         int err = WSAGetLastError();
+        printf("[DEBUG] Windows connect error: %d\n", err);
         switch (err) {
             case WSAEINPROGRESS:
+                printf("[DEBUG] Windows connect WSAEINPROGRESS\n");
+                return 0;
             case WSAEWOULDBLOCK:
+                printf("[DEBUG] Windows connect WSAEWOULDBLOCK\n");
+                return 0;
             case WSAEALREADY: {
+                printf("[DEBUG] Windows connect WSAEALREADY\n");
                 return 0;
             }
             case WSAEINTR: {
+                printf("[DEBUG] Windows connect WSAEINTR, retrying\n");
                 continue;
             }
             default: {
+                printf("[DEBUG] Windows connect failed with error: %d\n", err);
                 return err;
             }
         }
     }
 
-
 #else
+    printf("[DEBUG] POSIX connect path\n");
     int r;
-     do {
+    do {
         errno = 0;
         r = connect(fd, (struct sockaddr *)addr, namelen);
+        printf("[DEBUG] POSIX connect result: %d, errno: %d (%s)\n", r, errno, strerror(errno));
     } while (IS_EINTR(r));
 
     // connect() can return -1 with an errno of 0.
     // the errno is the correct one in that case.
     if (r == -1 && errno != 0) {
         if (errno == EINPROGRESS) {
+            printf("[DEBUG] POSIX connect EINPROGRESS (expected for non-blocking socket)\n");
             return 0;
         }
 
+        printf("[DEBUG] POSIX connect failed with errno: %d (%s)\n", errno, strerror(errno));
         return errno;
     }
+    
+    printf("[DEBUG] POSIX connect succeeded\n");
 
     return 0;
 #endif
@@ -1414,10 +1436,34 @@ static int is_loopback(struct sockaddr_storage *sockaddr) {
 }
 #endif
 
-LIBUS_SOCKET_DESCRIPTOR bsd_create_connect_socket(struct sockaddr_storage *addr, int options) {
+LIBUS_SOCKET_DESCRIPTOR bsd_create_connect_socket(struct sockaddr_storage *addr, int options, struct sockaddr_storage *local_addr) {
     LIBUS_SOCKET_DESCRIPTOR fd = bsd_create_socket(addr->ss_family, SOCK_STREAM, 0, NULL);
     if (fd == LIBUS_SOCKET_ERROR) {
+        printf("[DEBUG] Failed to create socket\n");
         return LIBUS_SOCKET_ERROR;
+    }
+
+    if (local_addr != NULL) {
+        printf("[DEBUG] Attempting to bind to local address\n");
+        if (local_addr->ss_family == AF_INET) {
+            struct sockaddr_in *addr_in = (struct sockaddr_in *)local_addr;
+            char ip_str[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &(addr_in->sin_addr), ip_str, INET_ADDRSTRLEN);
+            printf("[DEBUG] Binding to IPv4 address: %s, port: %d\n", ip_str, ntohs(addr_in->sin_port));
+        } else if (local_addr->ss_family == AF_INET6) {
+            struct sockaddr_in6 *addr_in6 = (struct sockaddr_in6 *)local_addr;
+            char ip_str[INET6_ADDRSTRLEN];
+            inet_ntop(AF_INET6, &(addr_in6->sin6_addr), ip_str, INET6_ADDRSTRLEN);
+            printf("[DEBUG] Binding to IPv6 address: %s, port: %d\n", ip_str, ntohs(addr_in6->sin6_port));
+        } else {
+            printf("[DEBUG] Unknown address family: %d\n", local_addr->ss_family);
+        }
+        if (bind(fd, (struct sockaddr *) local_addr, sizeof(struct sockaddr_storage)) < 0) {
+            printf("[DEBUG] Failed to bind to local address: %s (errno: %d)\n", strerror(errno), errno);
+            bsd_close_socket(fd);
+            return LIBUS_SOCKET_ERROR;
+        }
+        printf("[DEBUG] Successfully bound to local address\n");
     }
 
 #ifdef _WIN32
@@ -1452,12 +1498,33 @@ LIBUS_SOCKET_DESCRIPTOR bsd_create_connect_socket(struct sockaddr_storage *addr,
     }
 
 #endif
+
+    // Binding to local_addr is already done above if needed
+
+    printf("[DEBUG] Attempting to connect to remote address\n");
+    if (addr->ss_family == AF_INET) {
+        struct sockaddr_in *addr_in = (struct sockaddr_in *)addr;
+        char ip_str[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &(addr_in->sin_addr), ip_str, INET_ADDRSTRLEN);
+        printf("[DEBUG] Connecting to IPv4 address: %s, port: %d\n", ip_str, ntohs(addr_in->sin_port));
+    } else if (addr->ss_family == AF_INET6) {
+        struct sockaddr_in6 *addr_in6 = (struct sockaddr_in6 *)addr;
+        char ip_str[INET6_ADDRSTRLEN];
+        inet_ntop(AF_INET6, &(addr_in6->sin6_addr), ip_str, INET6_ADDRSTRLEN);
+        printf("[DEBUG] Connecting to IPv6 address: %s, port: %d\n", ip_str, ntohs(addr_in6->sin6_port));
+    }
+
     int rc = bsd_do_connect_raw(fd, (struct sockaddr*) addr, addr->ss_family == AF_INET ? sizeof(struct sockaddr_in) : sizeof(struct sockaddr_in6));
 
     if (rc != 0) {
+        int err = errno;
+        printf("[DEBUG] Connect failed with error: %d (%s)\n", err, strerror(err));
         bsd_close_socket(fd);
         return LIBUS_SOCKET_ERROR;
+    } else {
+        printf("[DEBUG] Connect initiated successfully\n");
     }
+
     return fd;
 }
 
